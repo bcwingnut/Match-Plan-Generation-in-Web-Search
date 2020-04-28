@@ -50,6 +50,7 @@ def run(env,
         'log': log_name,
         'tensorboard_dir': tensorboard_dir,
         'debug': True,
+        'env': env,
 
         'print_step': False,
         'print_freq': 32,  # print log in update per 'print_freq' episodes
