@@ -7,8 +7,8 @@ import torch
 
 @click.command()
 @click.option('--env', default='Goal-v0')  # = Platform-v0 / Goal-v0
-@click.option('--seed', default=1789)
-@click.option('--log_name', default="Goal_sac")
+@click.option('--seed', default=7)
+@click.option('--log_name', default="Goal_psac3")
 @click.option('--weights', default=[1., -1, 0.])  # [reward design]
 @click.option('--gamma', default=0.99)
 @click.option('--replay_buffer_size', default=50000)
@@ -83,6 +83,7 @@ def run(env,
             "discrete_bcloss_weight": 5,
             'pretrain': False,
             'pretrain_episodes': 50000,
+            'ep_punishment': 0.01,
 
             'save_model': True,  # save checkpoints or not
             'load_model': False,  # load checkpoints at the beginning or not, 'load_filename' should be assigned
@@ -93,10 +94,11 @@ def run(env,
             'forward_time': True,
 
             'L2_norm': 0,
-            'replay_buffer': 'n',
+            'replay_buffer': 'lp3',
             'demonstration_buffer': 'lp2',
             'capacity_distribution': 'uniform',
             'use_log': False,
+            'ep_punishment': 0.01
             # n for normal, p for prioritized(lifei), s for stratefied, l for sac_lstm, lp for prioritized_sac_lstm
             }
 
@@ -138,7 +140,7 @@ def seed_torch(seed=1029):
 if __name__ == '__main__':
     print('******PID:' + str(os.getpid()) + '******')
 
-    gpu_id = 2  # change here to alter GPU id
+    gpu_id = 1  # change here to alter GPU id
     print('GPU id:'+str(gpu_id))
     with torch.cuda.device(gpu_id):
         run()

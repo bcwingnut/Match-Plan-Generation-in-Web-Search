@@ -28,7 +28,7 @@ class PASAC_Agent_ERO(HybridBase):
 
         self.env = env
         
-        self.replay_buffer = ReplayBuffer_ERO(replay_buffer_size, device)
+        self.replay_buffer = ReplayBuffer_ERO(replay_buffer_size, device, reward_h)
         
         # [constants] copy
 
@@ -225,7 +225,7 @@ class PASAC_Agent_ERO(HybridBase):
         policy_loss_elementwise = self.alpha_c * log_prob + \
             self.alpha_d * action_sum_log_prob - predicted_new_q_value
 
-        total_errors = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*10+(episode-episodes)*-0.01).sum(dim=1).detach().cpu().numpy().squeeze(1)
+        total_errors = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*10).detach().cpu().numpy().squeeze(1)
         q_value_loss1 = (q_value_loss1_elementwise**2).mean()
         q_value_loss2 = (q_value_loss2_elementwise**2).mean()
         policy_loss = (policy_loss_elementwise).mean()
@@ -251,7 +251,7 @@ class PASAC_Agent_ERO(HybridBase):
         soft_update(self.target_soft_q_net1, self.soft_q_net1, soft_tau)
         soft_update(self.target_soft_q_net2, self.soft_q_net2, soft_tau)
 
-        return predicted_new_q_value.mean()
+        return predicted_new_q_value.mean(), total_errors.mean()
 
     def collect_demonstration(self, dem_number, need_print: bool=False):
         if self.debug['load_demonstration']:
@@ -302,7 +302,8 @@ class PASAC_Agent_ERO(HybridBase):
                 print('[Size of demonstration buffer]', str(self.demonstration_buffer.bin_size))
 
     def update_replay_policy(self, current_cumulative_reward, previous_cumulative_reward, episode):
-        self.subset_buffer, self.subset_indices = self.replay_buffer.policy_update(self.batch_size, current_cumulative_reward, previous_cumulative_reward, episode)
+        self.subset_buffer, self.subset_indices, avg_replay_loss = self.replay_buffer.policy_update(self.batch_size, current_cumulative_reward, previous_cumulative_reward, episode)
+        return avg_replay_loss
 
 def is_prioritized(buffer):
     return isinstance(buffer, PrioritizedReplayBuffer_SAC_MLP) or \

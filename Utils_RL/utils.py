@@ -708,7 +708,7 @@ class PrioritizedReplayBuffer_SAC_MLP:
     https://arxiv.org/pdf/1511.05952.pdf and https://cardwing.github.io/files/RL_course_report.pdf for details
     """
     e = 0.01
-    d = 100
+    d = 0
     alpha = 2.0
     beta = 1.0
     beta_increment_per_sampling = 0.01
@@ -862,7 +862,7 @@ class PrioritizedReplayBuffer_Original:
     https://arxiv.org/pdf/1511.05952.pdf and https://cardwing.github.io/files/RL_course_report.pdf for details
     """
     e = 0.01
-    d = 100
+    d = 0
     alpha = 2.0
     beta = 1.0
     beta_increment_per_sampling = 0.01
@@ -979,7 +979,7 @@ class ReplayBuffer_ERO:
     https://www.ijcai.org/proceedings/2019/589 for details
     """
 
-    def __init__(self, capacity, device):
+    def __init__(self, capacity, device, reward_h):
         """ Prioritized experience replay buffer initialization."""
         self.capacity = capacity
         self.buffer = np.zeros(capacity, dtype=object)
@@ -988,13 +988,18 @@ class ReplayBuffer_ERO:
         self.replay_updating_step = 1
         self.device = device
         self.score_net = nn.Sequential(
-            nn.Linear(3, 1),
+            nn.Linear(3, 64),
+            nn.Linear(64, 64),
+            nn.Linear(64, 1),
             nn.Sigmoid()
         ).to(device)
         self.position = 0
         self.size = 0
-        self.score_net_optimizer = torch.optim.Adam(self.score_net.parameters(), lr=1e-4, weight_decay=0.01)
+        self.score_net_optimizer = torch.optim.Adam(self.score_net.parameters(), lr=1e-4, weight_decay=0.)
         self.replay_updating_batch_size = 64
+        self.td_scale=1e-6
+        self.ep_scale=2e-6
+        self.rw_scale=1./reward_h
 
 
     def push(self, state, action_v, param, reward, next_state, done, episode):
@@ -1006,21 +1011,25 @@ class ReplayBuffer_ERO:
 
     def policy_update(self, batch_size, current_cummulative_reward, previous_cummulative_reward, current_episode):
         replay_reward = current_cummulative_reward - previous_cummulative_reward
+        replay_losses = []
         for i in range(self.replay_updating_step):
             batch, indices = self.sample(self.replay_updating_batch_size)
             scores = self.scores[indices]
             state, action, param, reward, next_state, done, episode = batch
             temporal_difference = self.td[indices]
             mask  = torch.FloatTensor(np.random.binomial(1, scores)).unsqueeze(1).to(self.device)
-            score_features = torch.FloatTensor(np.stack([temporal_difference, current_episode-np.array(episode), reward],axis=1)).to(self.device)
-            replay_loss = mask*torch.log(self.score_net(score_features))+(1-mask)*torch.log(1-self.score_net(score_features))
+            score_features = torch.FloatTensor(np.stack([temporal_difference*self.td_scale, (current_episode-np.array(episode))*self.ep_scale, np.array(reward)*self.rw_scale],axis=1)).to(self.device)
+            replay_loss = mask*torch.log(self.score_net(score_features)+1e-4)+(1-mask)*torch.log(1-self.score_net(score_features)+1e-4)
+            replay_loss = -replay_loss*replay_reward
             replay_loss = replay_loss.mean()
+            replay_losses.append(replay_loss.mean().detach().cpu().numpy())
             self.score_net_optimizer.zero_grad()
             replay_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.score_net.parameters(), 5)
             self.score_net_optimizer.step()
         subset, indices = self.sample_subset()
-        return subset, indices
+        avg_replay_loss = np.asarray(replay_losses).mean()
+        return subset, indices, avg_replay_loss
 
     def score_update(self, indices, td, current_episode):
         self.td[indices] = td
@@ -1028,12 +1037,10 @@ class ReplayBuffer_ERO:
         state, action, param, reward, next_state, done, episode = zip(*batch)
         reward=np.array(reward)
         episode=np.array(episode)
-        score_features = torch.FloatTensor(np.stack([td, current_episode-episode, reward],axis=1)).to(self.device)
+        score_features = torch.FloatTensor(np.stack([td*self.td_scale, (current_episode-episode)*self.ep_scale, reward*self.rw_scale],axis=1)).to(self.device)
+        self.score_net.eval()
         scores = self.score_net(score_features).detach().cpu().numpy().squeeze(1)
         if np.any(np.isnan(scores)):
-            for name, param in self.score_net.named_parameters():
-                if param.requires_grad:
-                    print(name, param.data)
             print("NaN score")
         self.scores[indices] = scores
 
@@ -1118,7 +1125,7 @@ class PrioritizedReplayBuffer_SAC2_MLP:
     https://arxiv.org/pdf/1511.05952.pdf and https://cardwing.github.io/files/RL_course_report.pdf for details
     """
     e = 0.01
-    d = 100
+    d = 0
     alpha = 2.0
     beta = 1.0
     beta_increment_per_sampling = 0.01

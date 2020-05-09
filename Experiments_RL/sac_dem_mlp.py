@@ -190,12 +190,12 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             dem_mask = torch.FloatTensor(np.concatenate((np.zeros(len(indices)-len(dem_indices)),np.ones(len(dem_indices))))).to(self.device)
             episodes = episodes+dem_episodes
         if episodes is not None:
-            episodes = torch.FloatTensor(np.array(episodes)).unsqueeze(-1).unsqueeze(-1).to(self.device)
+            episodes = torch.FloatTensor(np.array(episodes)).unsqueeze(-1).to(self.device)
         if weights is not None:
             weights /= max(weights)
             if self.debug['demonstration_buffer'] in ['n']:
                 weights[batch_size-demonstration_num:]=0.5
-            weights = torch.FloatTensor(weights).unsqueeze(-1).unsqueeze(-1).to(self.device)
+            weights = torch.FloatTensor(weights).unsqueeze(-1).to(self.device)
 
 
         state      = torch.FloatTensor(state).to(self.device)
@@ -298,7 +298,7 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             policy_loss_elementwise += behavior_cloning_loss_elementwise.unsqueeze(-1) * self.debug['bcloss_weight']
 
         if is_prioritized(self.replay_buffer):
-            priorities = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*10+(episode-episodes)*-0.01).sum(dim=1)
+            priorities = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*10+(episode-episodes)*self.debug['ep_punishment']).sum(dim=1)
             q_value_loss1 = (q_value_loss1_elementwise**2*weights).mean()
             q_value_loss2 = (q_value_loss2_elementwise**2*weights).mean()
             policy_loss = (policy_loss_elementwise*weights).mean()
@@ -341,10 +341,10 @@ class PASAC_Agent_DEM_MLP(HybridBase):
 
         if is_prioritized(self.replay_buffer):
             self.replay_buffer.priority_update(
-                indices[:len(indices)-len(dem_indices)], priorities.squeeze(1).tolist()[:len(indices)-len(dem_indices)])
+                indices[:len(indices)-len(dem_indices)], priorities.tolist()[:len(indices)-len(dem_indices)])
         if self.debug['use_demonstration'] and is_prioritized(self.demonstration_buffer):
             self.demonstration_buffer.priority_update(
-                indices[len(indices)-len(dem_indices):], priorities.squeeze(1).tolist()[len(indices)-len(dem_indices):])
+                indices[len(indices)-len(dem_indices):], priorities.tolist()[len(indices)-len(dem_indices):])
 
         # -----Soft update the target value net-----
         soft_update(self.target_soft_q_net1, self.soft_q_net1, soft_tau)

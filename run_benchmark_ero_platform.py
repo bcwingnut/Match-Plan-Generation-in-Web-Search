@@ -138,7 +138,7 @@ def seed_torch(seed=1029):
 if __name__ == '__main__':
     print('******PID:' + str(os.getpid()) + '******')
 
-    gpu_id = 3  # change here to alter GPU id
+    gpu_id = 1  # change here to alter GPU id
     print('GPU id:'+str(gpu_id))
     with torch.cuda.device(gpu_id):
         run()

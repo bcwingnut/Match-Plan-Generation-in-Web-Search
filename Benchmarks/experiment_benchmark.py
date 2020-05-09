@@ -480,6 +480,13 @@ def train_ero(log_name, env_name, debug,
     env = StateUnwrap(env)
     env = NormalizedHybridActions(env)
 
+    env1 = gym.make(env_name)
+    env1 = ScaledStateWrapper(env1)
+
+    env1 = ActionUnwrap(env1)  #  scale to [-1,1] to match the range of tanh
+    env1 = StateUnwrap(env1)
+    env1 = NormalizedHybridActions(env1)
+
     # env specific
     state_dim = env.observation_space.shape[0]
     action_discrete_dim, action_continuous_dim = env.action_space.spaces[0].n, env.action_space.spaces[1].shape[0]
@@ -501,6 +508,8 @@ def train_ero(log_name, env_name, debug,
     if not use_nni:
         writer = SummaryWriter(NAME)
     previous_cumulative_reward = 0.
+    state0 = env.reset()
+    action0, _, action_v0, param0 = agent.act(state0, debug['sampling'])
     for episode in range(train_episodes):
         # -----save model-----
         if debug['save_model'] and episode % debug['save_freq'] == 0 and episode > 0:
@@ -511,6 +520,7 @@ def train_ero(log_name, env_name, debug,
 
         # -----reset env-----
         state = env.reset()
+        next_state0, reward0, done0, _ = env.step(action0)
 
         # -----init-----
         episode_reward_sum = 0.
@@ -525,27 +535,46 @@ def train_ero(log_name, env_name, debug,
 
             # -----move to the next step-----
             state = next_state
+
+            # -----done-----
+            if done:
+                break
+        env1.seed(0)
+        state = env1.reset()
+        for step in range(max_steps):
+            # -----step-----
+            action, _, action_v, param = agent.act(state, debug['sampling'])
+            next_state, reward, done, _ = env1.step(action)
+
+            # -----move to the next step-----
+            state = next_state
             episode_reward_sum += reward
 
             # -----done-----
             if done:
-                break        
-        
-        agent.update_replay_policy(episode_reward_sum, previous_cumulative_reward, episode)
+                break
+        avg_replay_loss = agent.update_replay_policy(episode_reward_sum, previous_cumulative_reward, episode)
+        writer.add_scalar('Replay-Loss-' + env_name, avg_replay_loss, global_step=episode)
         previous_cumulative_reward = episode_reward_sum
 
         # -----update models-----
+        avg_total_error_lst = []
         for _ in range(training_step):
             if len(agent.replay_buffer) > batch_size and step % update_freq == 0:
-                agent.update(batch_size,
+                avg_predicted_new_q_value, avg_total_error = agent.update(batch_size,
                              episode=episode,
                              auto_entropy=True,
                              soft_tau=soft_tau,
                              target_entropy=-1. * (action_continuous_dim),
                              need_print=(episode % debug['print_freq'] == 0) and step == 0)
+                avg_total_error_lst.append(avg_total_error)
+        writer.add_scalar('Total-Error-' + env_name, np.asarray(avg_total_error_lst).mean(), global_step=episode)
 
         if episode % 100 == 0:
             print(f'episode: {episode}, reward: {episode_reward_sum}')
+            # for name, param in agent.replay_buffer.score_net.named_parameters():
+            #     if param.requires_grad:
+            #         print(name, param.data)
         returns.append(episode_reward_sum)
         if not use_nni:
             writer.add_scalar('Training-Reward-' + env_name, episode_reward_sum, global_step=episode)
@@ -570,4 +599,3 @@ def train_ero(log_name, env_name, debug,
     env.close()
     if not use_nni:
         writer.close()
-

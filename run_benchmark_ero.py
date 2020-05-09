@@ -7,7 +7,7 @@ import torch
 
 @click.command()
 @click.option('--env', default='Goal-v0')  # = Platform-v0 / Goal-v0
-@click.option('--seed', default=5)
+@click.option('--seed', default=2)
 @click.option('--log_name', default="Goal_ero")
 @click.option('--weights', default=[1., -1, 0.])  # [reward design]
 @click.option('--gamma', default=0.99)
@@ -138,7 +138,7 @@ def seed_torch(seed=1029):
 if __name__ == '__main__':
     print('******PID:' + str(os.getpid()) + '******')
 
-    gpu_id = 2  # change here to alter GPU id
+    gpu_id = 6  # change here to alter GPU id
     print('GPU id:'+str(gpu_id))
     with torch.cuda.device(gpu_id):
         run()
