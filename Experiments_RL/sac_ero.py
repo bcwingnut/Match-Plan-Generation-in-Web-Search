@@ -28,7 +28,7 @@ class PASAC_Agent_ERO(HybridBase):
 
         self.env = env
         
-        self.replay_buffer = ReplayBuffer_ERO(replay_buffer_size, device, reward_h)
+        self.replay_buffer = ReplayBuffer_ERO(replay_buffer_size, device, reward_h, replay_updating_step=self.debug['replay_updating_step'])
         
         # [constants] copy
 
@@ -86,6 +86,13 @@ class PASAC_Agent_ERO(HybridBase):
         self.soft_tau = soft_tau
         self.use_exp = use_exp
         self.discrete_log_prob_scale = discrete_log_prob_scale
+        self.alpha_c = 1.
+        self.alpha_d = 1.
+
+        if self.debug['env'] == 'Platform-v0':
+            self.w_policy_loss = 0.05
+        elif self.debug['env'] == 'Goal-v0':
+            self.w_policy_loss = 10
 
         # load models if needed
         if self.debug['load_model'] and self.debug['load_filename'] is not None:
@@ -128,6 +135,34 @@ class PASAC_Agent_ERO(HybridBase):
             action = v2id((action_v, param), from_tensor=False)
         return action, action_enc, action_v, param
 
+    def get_log_action_prob(self, action_prob, use_exp):
+        if self.use_exp:  # expectation
+            action_log_prob = torch.log(action_prob)
+            action_log_prob = action_log_prob.mul(action_prob)  # calculate expectation
+            action_log_prob[action_log_prob!=action_log_prob] = 0  # set NaN to zero
+            action_log_prob.clamp_(-10, 0)
+            action_sum_log_prob = torch.sum(action_log_prob, dim=-1)
+            action_sum_log_prob = action_sum_log_prob.view(action_sum_log_prob.size(0), 1)
+        else:  # sampling
+            action_sample_all = []
+            for action in action_prob:
+                action_sample = []
+                for a in action:
+                    a = a.detach().cpu().numpy()
+                    choices = range(len(a))
+                    if a[0] == 0:
+                        action_sample.append(0)
+                        continue
+                    idx = np.random.choice(choices, p=a)
+                    action_sample.append(a[idx].item())
+                action_sample_all.append(action_sample)
+            action_sample_all = torch.FloatTensor(action_sample_all)
+            action_log_prob = torch.log(action_sample_all)
+            action_sum_log_prob = action_log_prob.view(action_log_prob.size(0), self.max_steps, 1)
+            action_sum_log_prob = action_sum_log_prob.to(self.device)
+
+        return action_sum_log_prob
+
     def update(self, batch_size, episode=0, auto_entropy=True, target_entropy=-2, gamma=0.99, soft_tau=1e-2, need_print=False):
         episodes = None
         indices = np.random.choice(len(self.subset_indices), batch_size)
@@ -146,37 +181,10 @@ class PASAC_Agent_ERO(HybridBase):
         new_next_action_v, new_next_param, next_log_prob, _, _, _ = self.policy_net.evaluate(next_state)
 
         # TODO: debug action_mean_log_prob
-        def get_log_action_prob(action_prob, use_exp):
-            if self.use_exp:  # expectation
-                action_log_prob = torch.log(action_prob)
-                action_log_prob = action_log_prob.mul(action_prob)  # calculate expectation
-                action_log_prob[action_log_prob!=action_log_prob] = 0  # set NaN to zero
-                action_log_prob.clamp_(-10, 0)
-                action_sum_log_prob = torch.sum(action_log_prob, dim=-1)
-                action_sum_log_prob = action_sum_log_prob.view(action_sum_log_prob.size(0), 1)
-            else:  # sampling
-                action_sample_all = []
-                for action in action_prob:
-                    action_sample = []
-                    for a in action:
-                        a = a.detach().cpu().numpy()
-                        choices = range(len(a))
-                        if a[0] == 0:
-                            action_sample.append(0)
-                            continue
-                        idx = np.random.choice(choices, p=a)
-                        action_sample.append(a[idx].item())
-                    action_sample_all.append(action_sample)
-                action_sample_all = torch.FloatTensor(action_sample_all)
-                action_log_prob = torch.log(action_sample_all)
-                action_sum_log_prob = action_log_prob.view(action_log_prob.size(0),
-                                                           self.max_steps, 1)
-                action_sum_log_prob = action_sum_log_prob.to(self.device)
+        
 
-            return action_sum_log_prob
-
-        action_sum_log_prob = get_log_action_prob(new_action_v, self.use_exp)
-        action_sum_log_prob_next = get_log_action_prob(new_next_action_v, self.use_exp)
+        action_sum_log_prob = self.get_log_action_prob(new_action_v, self.use_exp)
+        action_sum_log_prob_next = self.get_log_action_prob(new_next_action_v, self.use_exp)
 
         if auto_entropy:
             alpha_loss_d = -(self.log_alpha_d * (action_sum_log_prob +
@@ -225,7 +233,7 @@ class PASAC_Agent_ERO(HybridBase):
         policy_loss_elementwise = self.alpha_c * log_prob + \
             self.alpha_d * action_sum_log_prob - predicted_new_q_value
 
-        total_errors = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*10).detach().cpu().numpy().squeeze(1)
+        total_errors = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*self.w_policy_loss).detach().cpu().numpy().squeeze(1)
         q_value_loss1 = (q_value_loss1_elementwise**2).mean()
         q_value_loss2 = (q_value_loss2_elementwise**2).mean()
         policy_loss = (policy_loss_elementwise).mean()

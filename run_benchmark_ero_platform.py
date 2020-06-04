@@ -86,7 +86,7 @@ def run(env,
 
             'save_model': True,  # save checkpoints or not
             'load_model': False,  # load checkpoints at the beginning or not, 'load_filename' should be assigned
-            'checkpoint_save_path': '/data/data0/xuehui/workspace/csh/cp',
+            'checkpoint_save_path': '/data/data2/csh/cp',
             'replay_buffer_save_path': '/data/data2/csh/buffer/psac2_ep20000_20200402124642.pk',
             'load_filename': 'psac2-20000-Apr-02-2020 12:46:39',  # prefix of the checkpoint
             'save_freq': 10000,  # save a model per 'save_freq' episodes

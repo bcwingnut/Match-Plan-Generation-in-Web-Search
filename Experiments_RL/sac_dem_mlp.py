@@ -28,7 +28,7 @@ class PASAC_Agent_DEM_MLP(HybridBase):
 
         self.env = env
         
-        assert debug['replay_buffer'] in ['n', 'p', 's', 'l', 'lp', 'ld', 'lp2', 'lp3']
+        assert debug['replay_buffer'] in ['n', 'p', 's', 'l', 'lp', 'ld', 'lp2', 'lp3', 'op']
         if debug['replay_buffer'] == 'n':
             self.replay_buffer = ReplayBuffer(replay_buffer_size)
         elif debug['replay_buffer'] == 'p':
@@ -43,6 +43,8 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             self.replay_buffer = PrioritizedReplayBuffer_SAC2_MLP(replay_buffer_size, reward_l, reward_h, data_bin)
         elif debug['replay_buffer'] == 'lp3':
             self.replay_buffer = PrioritizedReplayBuffer_SAC3_MLP(replay_buffer_size, debug['capacity_distribution'], reward_l, reward_h, data_bin)
+        elif debug['replay_buffer'] == 'op':
+            self.replay_buffer = PrioritizedReplayBuffer_Original(replay_buffer_size)
         
         # [constants] copy
 
@@ -119,7 +121,7 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             elif self.debug['demonstration_buffer']in['lp3','ld']:
                 self.demonstration_buffer = PrioritizedReplayBuffer_SAC3_MLP(self.debug['demonstration_buffer_size'], 'uniform', reward_l, reward_h, data_bin)
             elif self.debug['demonstration_buffer']=='op':
-                self.demonstration_buffer =  PrioritizedReplayBuffer_Original_MLP(self.debug['demonstration_buffer_size'])
+                self.demonstration_buffer =  PrioritizedReplayBuffer_Original(self.debug['demonstration_buffer_size'])
 
             self.collect_demonstration(self.debug['demonstration_number'])
         else:
@@ -190,7 +192,7 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             dem_mask = torch.FloatTensor(np.concatenate((np.zeros(len(indices)-len(dem_indices)),np.ones(len(dem_indices))))).to(self.device)
             episodes = episodes+dem_episodes
         if episodes is not None:
-            episodes = torch.FloatTensor(np.array(episodes)).unsqueeze(-1).to(self.device)
+            episodes = torch.FloatTensor(np.array(episodes)).to(self.device)
         if weights is not None:
             weights /= max(weights)
             if self.debug['demonstration_buffer'] in ['n']:
@@ -298,7 +300,10 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             policy_loss_elementwise += behavior_cloning_loss_elementwise.unsqueeze(-1) * self.debug['bcloss_weight']
 
         if is_prioritized(self.replay_buffer):
-            priorities = (q_value_loss1_elementwise**2+q_value_loss2_elementwise**2+policy_loss_elementwise**2*10+(episode-episodes)*self.debug['ep_punishment']).sum(dim=1)
+            # print((q_value_loss1_elementwise**2).mean().item(),(policy_loss_elementwise**2).mean().item(),(episode-episodes).mean().item())
+            td = (q_value_loss1_elementwise.abs()+q_value_loss2_elementwise.abs()+policy_loss_elementwise*self.debug['policy_loss_w']).sum(dim=1)
+            # print('qloss:',q_value_loss1_elementwise[0][0].item(), 'ploss',policy_loss_elementwise[0][0].item())
+            priorities = td+(episode-episodes)*self.debug['ep_punishment']
             q_value_loss1 = (q_value_loss1_elementwise**2*weights).mean()
             q_value_loss2 = (q_value_loss2_elementwise**2*weights).mean()
             policy_loss = (policy_loss_elementwise*weights).mean()
@@ -341,10 +346,10 @@ class PASAC_Agent_DEM_MLP(HybridBase):
 
         if is_prioritized(self.replay_buffer):
             self.replay_buffer.priority_update(
-                indices[:len(indices)-len(dem_indices)], priorities.tolist()[:len(indices)-len(dem_indices)])
+                indices[:len(indices)-len(dem_indices)], priorities.tolist()[:len(indices)-len(dem_indices)], td.tolist()[:len(indices)-len(dem_indices)])
         if self.debug['use_demonstration'] and is_prioritized(self.demonstration_buffer):
             self.demonstration_buffer.priority_update(
-                indices[len(indices)-len(dem_indices):], priorities.tolist()[len(indices)-len(dem_indices):])
+                indices[len(indices)-len(dem_indices):], priorities.tolist()[len(indices)-len(dem_indices):], td.tolist()[len(indices)-len(dem_indices):])
 
         # -----Soft update the target value net-----
         soft_update(self.target_soft_q_net1, self.soft_q_net1, soft_tau)

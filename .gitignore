@@ -134,3 +134,5 @@ tensorboard_log/*
 .vscode/launch.json
 .vscode/extensions.json
 /.vscode/
+
+plot

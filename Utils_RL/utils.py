@@ -10,11 +10,12 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from Utils_RL.sum_tree import MinSegmentTree, SumSegmentTree, SumTree
 import pdb
+import itertools
 
 device = torch.device('cuda')
 d = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PATransition = namedtuple('PATransition', ('state', 'action', 'param', 'reward', 'next_state', 'done'))  # ,
-
+Experience = namedtuple('Experience', 'obs1 act last_act rew obs2 done episode td st')
 
 ########################## (Parameterized) Action Utilities ##########################
 
@@ -237,10 +238,10 @@ class ReplayBuffer_MLP:
         self.buffer = []
         self.position = 0
     
-    def push(self, state, action_v, param, reward, next_state, done):
+    def push(self, state, action_v, param, reward, next_state, done, episode):
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (state, action_v, param, reward, next_state, done)
+        self.buffer[self.position] = Experience(state, action_v, param, reward, next_state, done, episode, 0, 0)
         self.position = int((self.position + 1) % self.capacity)  # as a ring buffer
     
     def sample(self, batch_size):
@@ -256,6 +257,11 @@ class ReplayBuffer_MLP:
     
     def __len__(self):
         return len(self.buffer)
+
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
 
 
 class PrioritizedReplayBuffer_MLP:
@@ -279,11 +285,11 @@ class PrioritizedReplayBuffer_MLP:
         """ get priority for TD error"""
         return (np.abs(error) + self.e) ** self.alpha
 
-    def push(self, state, action, last_action, reward, next_state, done):
+    def push(self, state, action, last_action, reward, next_state, done, episode):
         """  push a sample into prioritized replay buffer"""
-        self.buffer.add(self._max_priority, (state, action, last_action, reward, next_state, done))
+        self.buffer.add(self._max_priority, Experience(state, action, last_action, reward, next_state, done, episode, 0, 0))
 
-    def priority_update(self, indices, priorities):
+    def priority_update(self, indices, priorities, tds):
         """ The methods update samples's priority.
         Parameters
         ----------
@@ -294,6 +300,8 @@ class PrioritizedReplayBuffer_MLP:
             p = self._get_priority(error)
             self._max_priority = max(self._max_priority, p)
             self.buffer.update(idx, p)
+        for i in range(len(indices)):
+            self.buffer.data[indices[i]-self.buffer.capacity+1] = self.buffer[indices[i]-self.buffer.capacity+1]._replace(td=tds[i], st=self.buffer[indices[i]-self.buffer.capacity+1].st+1)
 
     def sample(self, batch_size):
         """ sample batch_size data from replay buffer """
@@ -365,6 +373,11 @@ class PrioritizedReplayBuffer_MLP:
 
     def __getitem__(self, key):
         return self.buffer.data[key]
+    
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
 
 
 ########################## Action Wrapper ##########################
@@ -396,10 +409,10 @@ class ReplayBuffer_MLP:
         self.buffer = []
         self.position = 0
     
-    def push(self, state, action_v, param, reward, next_state, done):
+    def push(self, state, action_v, param, reward, next_state, done, episode, td):
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (state, action_v, param, reward, next_state, done)
+        self.buffer[self.position] = Experience(state, action_v, param, reward, next_state, done, episode, 0, 0)
         self.position = int((self.position + 1) % self.capacity)  # as a ring buffer
     
     def sample(self, batch_size):
@@ -415,6 +428,11 @@ class ReplayBuffer_MLP:
     
     def __len__(self):
         return len(self.buffer)
+    
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
 
 
 class ReplayBuffer:
@@ -427,8 +445,8 @@ class ReplayBuffer:
         """ push a transition tuple with parameterized action (action encoding & parameters) """
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (
-            state, action_v, param, reward, next_state, done, episode)
+        self.buffer[self.position] = Experience(
+            state, action_v, param, reward, next_state, done, episode, 0, 0)
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
@@ -437,10 +455,10 @@ class ReplayBuffer:
             return [],[],[],[],[],[],[]
         batch = random.sample(self.buffer, batch_size)
         # action is 2-tuple, stack separately
-        _s, _a_v, _p, _r, _n, _d, _episode = zip(*batch)
-        state, action_v, param, reward, next_state, done, episode = map(
+        _s, _a_v, _p, _r, _n, _d, _episode, _ = zip(*batch)
+        state, action_v, param, reward, next_state, done, episode, _ = map(
             list, (_s, _a_v, _p, _r, _n, _d, _episode))
-        return state, action_v, param, reward, next_state, done, episode
+        return state, action_v, param, reward, next_state, done, episode, _
 
     def compress(self, semantic_length=100):
         compressed_buffer = copy.deepcopy(self)
@@ -470,6 +488,11 @@ class ReplayBuffer:
     def __getitem__(self, key):
         return self.buffer[key]
 
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
+
 
 class SequenceReplayBuffer:
     def __init__(self, capacity):
@@ -477,11 +500,11 @@ class SequenceReplayBuffer:
         self.buffer = []
         self.position = 0
 
-    def push(self, state, action_v, param, reward, next_state, done, episode):
+    def push(self, sample):
         """ push a transition tuple with parameterized action (action encoding & parameters) """
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (state, action_v, param, reward, next_state, done, episode)
+        self.buffer[self.position] = sample
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
@@ -726,9 +749,9 @@ class PrioritizedReplayBuffer_SAC_MLP:
 
     def push(self, state, action, last_action, reward, next_state, done, episode):
         """  push a sample into prioritized replay buffer"""
-        self.buffer.add(self._max_priority, (state, action, last_action, reward, next_state, done, episode))
+        self.buffer.add(self._max_priority, Experience(state, action, last_action, reward, next_state, done, episode, 0, 0))
 
-    def priority_update(self, indices, priorities):
+    def priority_update(self, indices, priorities, tds):
         """ The methods update samples's priority.
 
         Parameters
@@ -740,6 +763,8 @@ class PrioritizedReplayBuffer_SAC_MLP:
             p = self._get_priority(error)
             self._max_priority = max(self._max_priority, p)
             self.buffer.update(idx, p)
+        for i in range(len(indices)):
+            self.buffer.data[indices[i]-self.buffer.capacity+1] = self.buffer[indices[i]-self.buffer.capacity+1]._replace(td=tds[i], st=self.buffer[indices[i]-self.buffer.capacity+1].st+1)
 
     def sample(self, batch_size):
         """ sample batch_size data from replay buffer """
@@ -817,7 +842,7 @@ class PrioritizedReplayBuffer_SAC_MLP:
 
         s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, e_lst = [], [], [], [], [], [], []
         for sample in batch:
-            state, action, last_action, reward, next_state, done, episode = sample
+            state, action, last_action, reward, next_state, done, episode, _, _ = sample
             s_lst.append(state)
             a_lst.append(action)
             la_lst.append(last_action)
@@ -856,13 +881,22 @@ class PrioritizedReplayBuffer_SAC_MLP:
                 episode[0][i] = np.concatenate((episode[0][i], episode[0][0][-semantic_length:]))
         return uncompressed_buffer
 
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
+
+    @property
+    def priorities(self):
+        return self.buffer.tree[self.capacity-1:self.capacity-1+len(self)]
+
 class PrioritizedReplayBuffer_Original:
     """ 
     Prioritized Replay Buffer see 
     https://arxiv.org/pdf/1511.05952.pdf and https://cardwing.github.io/files/RL_course_report.pdf for details
     """
     e = 0.01
-    d = 0
+    d = 100
     alpha = 2.0
     beta = 1.0
     beta_increment_per_sampling = 0.01
@@ -879,9 +913,9 @@ class PrioritizedReplayBuffer_Original:
 
     def push(self, state, action, last_action, reward, next_state, done, episode):
         """  push a sample into prioritized replay buffer"""
-        self.buffer.add(self._max_priority, (state, action, last_action, reward, next_state, done, episode))
+        self.buffer.add(self._max_priority, Experience(state, action, last_action, reward, next_state, done, episode, 0, 0))
 
-    def priority_update(self, indices, priorities):
+    def priority_update(self, indices, priorities, tds):
         """ The methods update samples's priority.
 
         Parameters
@@ -893,6 +927,8 @@ class PrioritizedReplayBuffer_Original:
             p = self._get_priority(error)
             self._max_priority = max(self._max_priority, p)
             self.buffer.update(idx, p)
+        for i in range(len(indices)):
+            self.buffer.data[indices[i]-self.buffer.capacity+1] = self.buffer[indices[i]-self.buffer.capacity+1]._replace(td=tds[i], st=self.buffer[indices[i]-self.buffer.capacity+1].st+1)
 
     def sample(self, batch_size):
         """ sample batch_size data from replay buffer """
@@ -933,7 +969,7 @@ class PrioritizedReplayBuffer_Original:
 
         s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst = [], [], [], [], [], [], []
         for sample in batch:
-            state, action, last_action, reward, next_state, done, episode = sample
+            state, action, last_action, reward, next_state, done, episode, _, _= sample
             s_lst.append(state)
             a_lst.append(action)
             la_lst.append(last_action)
@@ -972,6 +1008,15 @@ class PrioritizedReplayBuffer_Original:
                 episode[0][i] = np.concatenate((episode[0][i], episode[0][0][-semantic_length:]))
         return uncompressed_buffer
 
+    @property
+    def priorities(self):
+        return self.buffer.tree[self.capacity-1:self.capacity-1+len(self)]
+
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
+
 class ReplayBuffer_ERO:
     
     """ 
@@ -979,33 +1024,30 @@ class ReplayBuffer_ERO:
     https://www.ijcai.org/proceedings/2019/589 for details
     """
 
-    def __init__(self, capacity, device, reward_h):
+    def __init__(self, capacity, device, reward_h, replay_updating_step=1):
         """ Prioritized experience replay buffer initialization."""
         self.capacity = capacity
         self.buffer = np.zeros(capacity, dtype=object)
         self.scores = np.zeros(capacity)
-        self.td = np.zeros(capacity)
-        self.replay_updating_step = 1
+        self.replay_updating_step = replay_updating_step
         self.device = device
         self.score_net = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.Linear(64, 64),
-            nn.Linear(64, 1),
+            nn.Linear(3, 1),
             nn.Sigmoid()
         ).to(device)
         self.position = 0
         self.size = 0
         self.score_net_optimizer = torch.optim.Adam(self.score_net.parameters(), lr=1e-4, weight_decay=0.)
-        self.replay_updating_batch_size = 64
+        self.replay_updating_batch_size = 2048
         self.td_scale=1e-6
         self.ep_scale=2e-6
         self.rw_scale=1./reward_h
 
 
-    def push(self, state, action_v, param, reward, next_state, done, episode):
+    def push(self, state, action_v, param, reward, next_state, done, episode, td):
         """  push a sample into prioritized replay buffer"""
         self.size = min(self.size+1, self.capacity)
-        self.buffer[self.position] = (state, action_v, param, reward, next_state, done, episode)
+        self.buffer[self.position] = Experience(state, action_v, param, reward, next_state, done, episode, td, 0)
         self.scores[self.position] = 1
         self.position = int((self.position + 1) % self.capacity)  # as a ring buffer
 
@@ -1015,10 +1057,9 @@ class ReplayBuffer_ERO:
         for i in range(self.replay_updating_step):
             batch, indices = self.sample(self.replay_updating_batch_size)
             scores = self.scores[indices]
-            state, action, param, reward, next_state, done, episode = batch
-            temporal_difference = self.td[indices]
+            state, action, param, reward, next_state, done, episode, td = batch
             mask  = torch.FloatTensor(np.random.binomial(1, scores)).unsqueeze(1).to(self.device)
-            score_features = torch.FloatTensor(np.stack([temporal_difference*self.td_scale, (current_episode-np.array(episode))*self.ep_scale, np.array(reward)*self.rw_scale],axis=1)).to(self.device)
+            score_features = torch.FloatTensor(np.stack([np.array(td)*self.td_scale, (current_episode-np.array(episode))*self.ep_scale, np.array(reward)*self.rw_scale],axis=1)).to(self.device)
             replay_loss = mask*torch.log(self.score_net(score_features)+1e-4)+(1-mask)*torch.log(1-self.score_net(score_features)+1e-4)
             replay_loss = -replay_loss*replay_reward
             replay_loss = replay_loss.mean()
@@ -1031,13 +1072,14 @@ class ReplayBuffer_ERO:
         avg_replay_loss = np.asarray(replay_losses).mean()
         return subset, indices, avg_replay_loss
 
-    def score_update(self, indices, td, current_episode):
-        self.td[indices] = td
+    def score_update(self, indices, tds, current_episode):
         batch = self.buffer[indices]
-        state, action, param, reward, next_state, done, episode = zip(*batch)
+        state, action, param, reward, next_state, done, episode, _, _ = zip(*batch)
+        for i in range(len(indices)):
+            self.buffer[indices[i]] = self.buffer[indices[i]]._replace(td=tds[i], st=self.buffer[indices[i]].st+1)
         reward=np.array(reward)
         episode=np.array(episode)
-        score_features = torch.FloatTensor(np.stack([td*self.td_scale, (current_episode-episode)*self.ep_scale, reward*self.rw_scale],axis=1)).to(self.device)
+        score_features = torch.FloatTensor(np.stack([tds*self.td_scale, (current_episode-episode)*self.ep_scale, reward*self.rw_scale],axis=1)).to(self.device)
         self.score_net.eval()
         scores = self.score_net(score_features).detach().cpu().numpy().squeeze(1)
         if np.any(np.isnan(scores)):
@@ -1049,9 +1091,9 @@ class ReplayBuffer_ERO:
         indices = np.random.choice(len(self), batch_size)
         batch = self.buffer[indices]
         scores = self.scores[indices]
-        s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst = [], [], [], [], [], [], []
+        s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst, td_lst = [], [], [], [], [], [], [], []
         for sample in batch:
-            state, action, last_action, reward, next_state, done, episode = sample
+            state, action, last_action, reward, next_state, done, episode, td, _ = sample
             s_lst.append(state)
             a_lst.append(action)
             la_lst.append(last_action)
@@ -1059,8 +1101,9 @@ class ReplayBuffer_ERO:
             ns_lst.append(next_state)
             d_lst.append(done)
             episode_lst.append(episode)
+            td_lst.append(td)
 
-        return (s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst), indices
+        return (s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst, td_lst), indices
     
     def sample_subset(self):
         mask  = np.random.binomial(1, self.scores)
@@ -1068,9 +1111,9 @@ class ReplayBuffer_ERO:
         batch = self.buffer[indices]
         scores = self.scores[indices]
 
-        s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst = [], [], [], [], [], [], []
+        s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst, td_lst = [], [], [], [], [], [], [], []
         for sample in batch:
-            state, action, last_action, reward, next_state, done, episode = sample
+            state, action, last_action, reward, next_state, done, episode, td, _ = sample
             s_lst.append(state)
             a_lst.append(action)
             la_lst.append(last_action)
@@ -1078,6 +1121,7 @@ class ReplayBuffer_ERO:
             ns_lst.append(next_state)
             d_lst.append(done)
             episode_lst.append(episode)
+            td_lst.append(td)
         s_lst=np.array(s_lst)
         a_lst=np.array(a_lst)
         la_lst=np.array(la_lst)
@@ -1086,7 +1130,8 @@ class ReplayBuffer_ERO:
         d_lst=np.array(d_lst)
         episode_lst=np.array(episode_lst)
         indices=np.array(indices)
-        return (s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst), indices
+        td_lst = np.array(td_lst)
+        return (s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst, td_lst), indices
 
     def __len__(self):
         return self.size
@@ -1116,8 +1161,11 @@ class ReplayBuffer_ERO:
                 episode[0][i] = np.concatenate((episode[0][i], episode[0][0][-semantic_length:]))
         return uncompressed_buffer
 
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
 
-Experience = namedtuple('Experience', 'obs1 act last_act rew obs2 done')
 
 class PrioritizedReplayBuffer_SAC2_MLP:
     """ 
@@ -1149,16 +1197,16 @@ class PrioritizedReplayBuffer_SAC2_MLP:
 
     def push(self, state, action, last_action, reward, next_state, done, episode):
         """  push a sample into prioritized replay buffer"""
-        self.buffer.add(self._max_priority, (state, action, last_action, reward, next_state, done, episode))
+        self.buffer.add(self._max_priority, Experience(state, action, last_action, reward, next_state, done, episode, 0, 0))
         
         bin_id = int(min(max((reward-self.reward_l)//self.reward_interval,0),self.data_bin-1))
-        self.bins[bin_id].push(*copy.deepcopy((state, action, last_action, reward, next_state, done, episode)))
+        self.bins[bin_id].push(copy.deepcopy(Experience(state, action, last_action, reward, next_state, done, episode, 0, 0)))
 
     @property
     def bin_size(self):
         return [len(b) for b in self.bins]
     
-    def priority_update(self, indices, priorities):
+    def priority_update(self, indices, priorities, tds):
         """ The methods update samples's priority.
 
         Parameters
@@ -1172,6 +1220,8 @@ class PrioritizedReplayBuffer_SAC2_MLP:
             p = self._get_priority(error)
             self._max_priority = max(self._max_priority, p)
             self.buffer.update(idx, p)
+        for i in range(len(indices)):
+            self.buffer.data[indices[i]-self.buffer.capacity+1] = self.buffer[indices[i]-self.buffer.capacity+1]._replace(td=tds[i], st=self.buffer[indices[i]-self.buffer.capacity+1].st+1)
 
     def sample(self, batch_size):
         """ sample batch_size data from replay buffer """
@@ -1241,7 +1291,7 @@ class PrioritizedReplayBuffer_SAC2_MLP:
 
         s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst = [], [], [], [], [], [], []
         for sample in batch:
-            state, action, last_action, reward, next_state, done, episode = sample
+            state, action, last_action, reward, next_state, done, episode, _, _ = sample
             s_lst.append(state)
             a_lst.append(action)
             la_lst.append(last_action)
@@ -1295,6 +1345,11 @@ class PrioritizedReplayBuffer_SAC2_MLP:
                         continue
                     episode[0][i] = np.concatenate((episode[0][i], episode[0][0][-semantic_length:]))
         return uncompressed_buffer
+    
+    def print_status(self):
+        for i in range(len(self)):
+            experience = self[i]
+            print(i, 'rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
 
 
 class PrioritizedReplayBuffer_SAC3_MLP:
@@ -1326,10 +1381,14 @@ class PrioritizedReplayBuffer_SAC3_MLP:
         self.bins[bin_id].push(state, action, last_action, reward, next_state, done, episode)
     
     @property
+    def buffer(self):
+        return list(itertools.chain.from_iterable([_bin[:len(_bin)] for _bin in self.bins]))
+
+    @property
     def bin_size(self):
         return [len(b) for b in self.bins]
     
-    def priority_update(self, indices, priorities):
+    def priority_update(self, indices, priorities, tds):
         """ The methods update samples's priority.
 
         Parameters
@@ -1337,7 +1396,7 @@ class PrioritizedReplayBuffer_SAC3_MLP:
         indices :
             list of sample indices
         """
-        for idx, error in zip(indices, priorities):
+        for idx, error, td in zip(indices, priorities, tds):
             if idx == -1:
                 continue
             if self.capacity_distribution=='uniform':
@@ -1351,7 +1410,7 @@ class PrioritizedReplayBuffer_SAC3_MLP:
             idx_in_bin = idx - sum([abin.buffer.tree_size for abin in self.bins[:bin_id]])
             if idx_in_bin<0:
                 print(idx_in_bin)
-            self.bins[bin_id].priority_update([idx_in_bin],[error])
+            self.bins[bin_id].priority_update([idx_in_bin],[error],[td])
 
     def sample(self, batch_size):
         """ sample batch_size data from replay buffer """
@@ -1423,6 +1482,17 @@ class PrioritizedReplayBuffer_SAC3_MLP:
                         continue
                     episode[0][i] = np.concatenate((episode[0][i], episode[0][0][-semantic_length:]))
         return uncompressed_buffer
+
+    def print_status(self):
+        for i in range(self.data_bin):
+            print('Bin '+str(i))
+            self.bins[i].print_status()
+
+    @property
+    def priorities(self):
+        return list(itertools.chain.from_iterable([_buf.buffer.tree[_buf.capacity-1:_buf.capacity-1+len(_buf)] for _buf in self.bins]))
+
+
 class NormalizedHybridActions(gym.ActionWrapper):
     """ Action Normalization: just normalize 2nd element in action tuple (id, (params)) """
 
@@ -1609,27 +1679,3 @@ class ParamNoise(object):
                 if original_actions is None else original_actions))
             self.perturb(self.net, param_std=self.param_std)
         return action_v, param, hidden_state_, cell_state_
-
-
-if __name__ == '__main__':
-    # test param noise
-    param_noise = ParamNoise(
-        param_std=0.05, action_std=0.3, adapt_coefficient=1.01)
-    from Utils_RL.models import HybridPolicyNetwork
-    net = HybridPolicyNetwork(10, 3, 3, 128).cuda()
-
-    param_noise.perturb(net)
-    print(param_noise.get_action(np.ones(10), evaluate=True))
-    param_noise.perturb(net)
-    print(param_noise.get_action(np.ones(10), evaluate=True))
-    param_noise.perturb(net)
-    print(param_noise.get_action(np.ones(10), evaluate=True))
-
-def is_prioritized(buffer):
-    return isinstance(buffer, PrioritizedReplayBuffer_SAC) or \
-        isinstance(buffer, PrioritizedReplayBuffer_SAC2) or \
-        isinstance(buffer, PrioritizedReplayBuffer_SAC3) or \
-        isinstance(buffer, PrioritizedReplayBuffer_Original)
-
-def has_multiple_bins(buffer):
-    return isinstance(buffer, PrioritizedReplayBuffer_SAC2) or isinstance(buffer, PrioritizedReplayBuffer_SAC3)

@@ -7,11 +7,11 @@ import torch
 
 @click.command()
 @click.option('--env', default='Goal-v0')  # = Platform-v0 / Goal-v0
-@click.option('--seed', default=2)
+@click.option('--seed', default=1)
 @click.option('--log_name', default="Goal_ero")
 @click.option('--weights', default=[1., -1, 0.])  # [reward design]
 @click.option('--gamma', default=0.99)
-@click.option('--replay_buffer_size', default=50000)
+@click.option('--replay_buffer_size', default=500000)
 # [network]
 @click.option('--hidden_size', default=2048)
 @click.option('--value_lr', default=0.0009270236969863404)
@@ -86,7 +86,7 @@ def run(env,
 
             'save_model': True,  # save checkpoints or not
             'load_model': False,  # load checkpoints at the beginning or not, 'load_filename' should be assigned
-            'checkpoint_save_path': '/data/data0/xuehui/workspace/csh/cp',
+            'checkpoint_save_path': '/data/data2/csh/cp',
             'replay_buffer_save_path': '/data/data2/csh/buffer/psac2_ep20000_20200402124642.pk',
             'load_filename': 'psac2-20000-Apr-02-2020 12:46:39',  # prefix of the checkpoint
             'save_freq': 10000,  # save a model per 'save_freq' episodes
@@ -97,6 +97,7 @@ def run(env,
             'demonstration_buffer': 'lp2',
             'capacity_distribution': 'uniform',
             'use_log': False,
+            'replay_updating_step': 10
             # n for normal, p for prioritized(lifei), s for stratefied, l for sac_lstm, lp for prioritized_sac_lstm
             }
 
@@ -138,7 +139,7 @@ def seed_torch(seed=1029):
 if __name__ == '__main__':
     print('******PID:' + str(os.getpid()) + '******')
 
-    gpu_id = 6  # change here to alter GPU id
+    gpu_id = 0  # change here to alter GPU id
     print('GPU id:'+str(gpu_id))
     with torch.cuda.device(gpu_id):
         run()

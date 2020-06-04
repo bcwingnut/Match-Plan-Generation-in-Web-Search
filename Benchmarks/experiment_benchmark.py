@@ -22,9 +22,10 @@ from Benchmarks.common.wrappers import ScaledStateWrapper, ScaledParameterisedAc
     QPAMDPScaledParameterisedActionWrapper
 from Benchmarks.common.platform_domain import PlatformFlattenedActionWrapper
 from Utils_RL.utils import NormalizedHybridActions, v2id, PATransition
+import matplotlib.pyplot as plt
 
 import logging
-import nni
+#import nni
 
 logger = logging.getLogger('benchmark_goal_tuning')
 
@@ -440,16 +441,30 @@ def train_dem_mlp(log_name, env_name, debug,
                   episode_reward_sum, '\n', '>>>>>>>>>>>>>>>>')
 
             # [evaluation]
-            episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=1)
+            episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=10)
             if not use_nni:
                 writer.add_scalar('EvalReward-' + env_name, episode_reward_eval, global_step=episode)
+        
+        if episode % 10000 < 3:
+            # print("Replay buffer in episode " + str(episode))
+            # agent.replay_buffer.print_status()
+            _,_,_,reward_arr,_,_,_,_,_ = zip(*agent.replay_buffer.buffer[:len(agent.replay_buffer)])
+            id_arr = np.arange(len(agent.replay_buffer))
+            priority_arr = agent.replay_buffer.priorities
+            plt.scatter(x=reward_arr, y=priority_arr, marker='.', s=1)
+            plt.savefig('plot/'+start.strftime('%m.%d-%H-%M-%S') + env_name + str(episode) + 'rw_pr.pdf')  
+            plt.clf()
+            plt.scatter(x=id_arr, y=priority_arr, marker='.', s=1)
+            plt.savefig('plot/'+start.strftime('%m.%d-%H-%M-%S') + env_name + str(episode) + 'id_pr.pdf')
+            plt.clf()
+            
 
     print("Ave. return =", sum(returns) / len(returns))
     print("Ave. last 100 episode return =", sum(returns[-100:]) / 100.)
 
     # [report final results]
     average_reward = sum(returns) / len(returns)
-    evaluate(agent, env, max_steps, use_nni, report_avg=average_reward, eval_repeat=100)  # less time
+    evaluate_mlp(agent, env, max_steps, use_nni, report_avg=average_reward, eval_repeat=100)  # less time
 
     env.close()
     if not use_nni:
@@ -530,8 +545,29 @@ def train_ero(log_name, env_name, debug,
             agent.total_step += 1
             action, _, action_v, param = agent.act(state, debug['sampling'])
             next_state, reward, done, _ = env.step(action)
+            state_=torch.FloatTensor([state]).to(agent.device)
+            action_v_=torch.FloatTensor([action_v]).to(agent.device)
+            param_=torch.FloatTensor([param]).to(agent.device)
+            next_state_=torch.FloatTensor([next_state]).to(agent.device)
+            predicted_q_value1 = agent.soft_q_net1(state_, action_v_, param_)
+            predicted_q_value2 = agent.soft_q_net2(state_, action_v_, param_)
+            new_action_v, new_param, log_prob, _, _, _ = agent.policy_net.evaluate(state_)
+            new_next_action_v, new_next_param, next_log_prob, _, _, _ = agent.policy_net.evaluate(next_state_)
+            predict_q1 = agent.soft_q_net1(state_, new_action_v, new_param)
+            predict_q2 = agent.soft_q_net2(state_, new_action_v, new_param)
+            predicted_new_q_value = torch.min(predict_q1, predict_q2)
+            predict_target_q1 = agent.target_soft_q_net1(next_state_, new_next_action_v, new_next_param)
+            predict_target_q2 = agent.target_soft_q_net2(next_state_, new_next_action_v, new_next_param)
+            action_sum_log_prob = agent.get_log_action_prob(new_action_v, agent.use_exp)
+            action_sum_log_prob_next = agent.get_log_action_prob(new_next_action_v, agent.use_exp)
+            policy_loss = agent.alpha_c * log_prob + agent.alpha_d * action_sum_log_prob - predicted_new_q_value
+            target_q_min = torch.min(predict_target_q1, predict_target_q2) - agent.alpha_c * next_log_prob - agent.alpha_d * action_sum_log_prob_next
+            target_q_value = reward + (1 - done) * gamma * target_q_min
+            q_value_loss1 = predicted_q_value1 - target_q_value.detach()
+            q_value_loss2 = predicted_q_value2 - target_q_value.detach()
+            error = (q_value_loss1**2+q_value_loss2**2+policy_loss**2*agent.w_policy_loss).detach().cpu().numpy().squeeze()
 
-            agent.replay_buffer.push(state, action_v, param, reward, next_state, done, episode)
+            agent.replay_buffer.push(state, action_v, param, reward, next_state, done, episode, error)
 
             # -----move to the next step-----
             state = next_state
@@ -572,9 +608,9 @@ def train_ero(log_name, env_name, debug,
 
         if episode % 100 == 0:
             print(f'episode: {episode}, reward: {episode_reward_sum}')
-            # for name, param in agent.replay_buffer.score_net.named_parameters():
-            #     if param.requires_grad:
-            #         print(name, param.data)
+            for name, param in agent.replay_buffer.score_net.named_parameters():
+                if param.requires_grad:
+                    print(name, param.data)
         returns.append(episode_reward_sum)
         if not use_nni:
             writer.add_scalar('Training-Reward-' + env_name, episode_reward_sum, global_step=episode)
@@ -588,6 +624,12 @@ def train_ero(log_name, env_name, debug,
             episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=1)
             if not use_nni:
                 writer.add_scalar('EvalReward-' + env_name, episode_reward_eval, global_step=episode)
+        
+        # if episode % 10000 < 3:
+        #     print("Replay buffer in episode " + str(episode))
+        #     for i in range(len(agent.replay_buffer)):
+        #         experience = agent.replay_buffer[i]
+        #         print('rw: ', str(experience.rew), 'td: ', str(experience.td), 'ep: ', str(experience.episode), 'st: ', str(experience.st))
 
     print("Ave. return =", sum(returns) / len(returns))
     print("Ave. last 100 episode return =", sum(returns[-100:]) / 100.)
