@@ -34,7 +34,7 @@ class PASAC_Agent_DEM_MLP(HybridBase):
         elif debug['replay_buffer'] == 'p':
             self.replay_buffer = PrioritizedReplayBuffer(replay_buffer_size)
         elif debug['replay_buffer'] == 's':
-            self.replay_buffer = RewardStratifiedReplayBuffer(replay_buffer_size)
+            self.replay_buffer = StratifiedReplayBuffer_MLP(replay_buffer_size, reward_l, reward_h, data_bin)
         elif debug['replay_buffer'] == 'l':
             self.replay_buffer = ReplayBufferLSTM2(replay_buffer_size)
         elif debug['replay_buffer'] == 'lp':
@@ -155,8 +155,10 @@ class PASAC_Agent_DEM_MLP(HybridBase):
             if need_print: print('Demonstrations sampled from each bin:'+str(list(dynamic_demonstration_num)))
         elif self.debug['pretrain']:
             demonstration_num = batch_size if episode<self.debug['pretrain_episodes'] else 0
-        else:
+        elif self.debug['use_demonstration']:
             demonstration_num = int(batch_size*self.demonstration_ratio(episode))
+        else:
+            demonstration_num = 0
         weights = None
         if self.debug['use_demonstration'] and self.debug['demonstration_buffer']=="ld":
             batch, indices, weights = self.replay_buffer.sample(
@@ -292,13 +294,17 @@ class PASAC_Agent_DEM_MLP(HybridBase):
         policy_loss_elementwise = self.alpha_c * log_prob + \
             self.alpha_d * action_sum_log_prob - predicted_new_q_value
 
-        if self.debug['use_demonstration'] and self.debug['behavior_cloning']:
-            q_filter = ((predicted_q_value1 + predicted_q_value2)/2 > reward).squeeze(1)*dem_mask
-            continuous_bcloss = ((new_param - param)**2).mean(dim=-1)
-            discrete_bcloss = F.binary_cross_entropy(new_action_v, action_v, reduce=False).mean(dim=-1)
-            behavior_cloning_loss_elementwise = q_filter * (continuous_bcloss + discrete_bcloss * self.debug["discrete_bcloss_weight"])
-            policy_loss_elementwise += behavior_cloning_loss_elementwise.unsqueeze(-1) * self.debug['bcloss_weight']
-
+        if self.debug['use_demonstration']:
+            if self.debug['behavior_cloning']=='p':
+                q_filter = ((predicted_q_value1 + predicted_q_value2)/2 < reward).squeeze(1)*dem_mask
+                continuous_bcloss = ((new_param - param)**2).mean(dim=-1)
+                discrete_bcloss = F.binary_cross_entropy(new_action_v, action_v, reduce=False).mean(dim=-1)
+                behavior_cloning_loss_elementwise = q_filter * (continuous_bcloss + discrete_bcloss * self.debug["discrete_bcloss_weight"])
+                policy_loss_elementwise += behavior_cloning_loss_elementwise.unsqueeze(-1) * self.debug['bcloss_weight']
+            elif self.debug['behavior_cloning']=='q':
+                q_filter = ((predicted_q_value1 + predicted_q_value2)/2 < reward).squeeze(1)*dem_mask
+                behavior_cloning_loss_elementwise = q_filter*(reward-(predicted_q_value1+predicted_q_value2)/2).squeeze(1)
+        
         if is_prioritized(self.replay_buffer):
             # print((q_value_loss1_elementwise**2).mean().item(),(policy_loss_elementwise**2).mean().item(),(episode-episodes).mean().item())
             td = (q_value_loss1_elementwise.abs()+q_value_loss2_elementwise.abs()+policy_loss_elementwise*self.debug['policy_loss_w']).sum(dim=1)

@@ -453,12 +453,12 @@ class ReplayBuffer:
         """ sample batch_size data from replay buffer """
         if batch_size == 0:
             return [],[],[],[],[],[],[]
-        batch = random.sample(self.buffer, batch_size)
+        batch = [random.choice(self.buffer) for _ in range(batch_size)]
         # action is 2-tuple, stack separately
-        _s, _a_v, _p, _r, _n, _d, _episode, _ = zip(*batch)
-        state, action_v, param, reward, next_state, done, episode, _ = map(
+        _s, _a_v, _p, _r, _n, _d, _episode, _, _ = zip(*batch)
+        state, action_v, param, reward, next_state, done, episode = map(
             list, (_s, _a_v, _p, _r, _n, _d, _episode))
-        return state, action_v, param, reward, next_state, done, episode, _
+        return state, action_v, param, reward, next_state, done, episode
 
     def compress(self, semantic_length=100):
         compressed_buffer = copy.deepcopy(self)
@@ -1024,7 +1024,7 @@ class ReplayBuffer_ERO:
     https://www.ijcai.org/proceedings/2019/589 for details
     """
 
-    def __init__(self, capacity, device, reward_h, replay_updating_step=1):
+    def __init__(self, capacity, device, rw_scale, replay_updating_step=1):
         """ Prioritized experience replay buffer initialization."""
         self.capacity = capacity
         self.buffer = np.zeros(capacity, dtype=object)
@@ -1032,16 +1032,18 @@ class ReplayBuffer_ERO:
         self.replay_updating_step = replay_updating_step
         self.device = device
         self.score_net = nn.Sequential(
-            nn.Linear(3, 1),
+            nn.Linear(3, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
             nn.Sigmoid()
         ).to(device)
         self.position = 0
         self.size = 0
-        self.score_net_optimizer = torch.optim.Adam(self.score_net.parameters(), lr=1e-4, weight_decay=0.)
+        self.score_net_optimizer = torch.optim.Adam(self.score_net.parameters(), lr=1e-4, weight_decay=0.01)
         self.replay_updating_batch_size = 2048
         self.td_scale=1e-6
-        self.ep_scale=2e-6
-        self.rw_scale=1./reward_h
+        self.ep_scale=1e-3
+        self.rw_scale=rw_scale
 
 
     def push(self, state, action_v, param, reward, next_state, done, episode, td):
@@ -1059,8 +1061,8 @@ class ReplayBuffer_ERO:
             scores = self.scores[indices]
             state, action, param, reward, next_state, done, episode, td = batch
             mask  = torch.FloatTensor(np.random.binomial(1, scores)).unsqueeze(1).to(self.device)
-            score_features = torch.FloatTensor(np.stack([np.array(td)*self.td_scale, (current_episode-np.array(episode))*self.ep_scale, np.array(reward)*self.rw_scale],axis=1)).to(self.device)
-            replay_loss = mask*torch.log(self.score_net(score_features)+1e-4)+(1-mask)*torch.log(1-self.score_net(score_features)+1e-4)
+            score_features = torch.FloatTensor(np.stack([np.array(td)*self.td_scale, (current_episode-np.array(episode)).clip(0,1e3)*self.ep_scale, np.array(reward)*self.rw_scale],axis=1)).to(self.device)
+            replay_loss = mask*torch.log(self.score_net(score_features)+1e-10)+(1-mask)*torch.log(1-self.score_net(score_features)+1e-10)
             replay_loss = -replay_loss*replay_reward
             replay_loss = replay_loss.mean()
             replay_losses.append(replay_loss.mean().detach().cpu().numpy())
@@ -1079,7 +1081,7 @@ class ReplayBuffer_ERO:
             self.buffer[indices[i]] = self.buffer[indices[i]]._replace(td=tds[i], st=self.buffer[indices[i]].st+1)
         reward=np.array(reward)
         episode=np.array(episode)
-        score_features = torch.FloatTensor(np.stack([tds*self.td_scale, (current_episode-episode)*self.ep_scale, reward*self.rw_scale],axis=1)).to(self.device)
+        score_features = torch.FloatTensor(np.stack([tds*self.td_scale, (current_episode-episode).clip(0,1e3)*self.ep_scale, reward*self.rw_scale],axis=1)).to(self.device)
         self.score_net.eval()
         scores = self.score_net(score_features).detach().cpu().numpy().squeeze(1)
         if np.any(np.isnan(scores)):
@@ -1492,27 +1494,103 @@ class PrioritizedReplayBuffer_SAC3_MLP:
     def priorities(self):
         return list(itertools.chain.from_iterable([_buf.buffer.tree[_buf.capacity-1:_buf.capacity-1+len(_buf)] for _buf in self.bins]))
 
+class StratifiedReplayBuffer_MLP:
+    """ 
+    Prioritized Replay Buffer see 
+    https://arxiv.org/pdf/1511.05952.pdf and https://cardwing.github.io/files/RL_course_report.pdf for details
+    """
 
-class NormalizedHybridActions(gym.ActionWrapper):
-    """ Action Normalization: just normalize 2nd element in action tuple (id, (params)) """
+    def __init__(self, capacity, reward_l, reward_h, data_bin):
+        """ Prioritized experience replay buffer initialization."""
+        self.capacity = capacity
+        self._max_priority = 1.0
+        self.bins = []
+        self.data_bin = data_bin
+        self.reward_l = reward_l
+        self.reward_h = reward_h
+        self.interval = (self.reward_h-self.reward_l)/self.data_bin
+        for _ in range(self.data_bin):
+            self.bins.append(ReplayBuffer(capacity//data_bin))
 
-    def action(self, action: tuple) -> tuple:
-        low = self.action_space[1].low
-        high = self.action_space[1].high
+    def push(self, state, action, last_action, reward, next_state, done, episode):
+        """  push a sample into prioritized replay buffer"""
+        bin_id = int(min(max((reward-self.reward_l)//self.interval,0),self.data_bin-1))
+        self.bins[bin_id].push(state, action, last_action, reward, next_state, done, episode)
+    
+    @property
+    def buffer(self):
+        return list(itertools.chain.from_iterable([_bin[:len(_bin)] for _bin in self.bins]))
 
-        param = 0.5 * (action[1] + 1.0) * (high - low) + low
-        param = np.clip(param, low, high)
+    @property
+    def bin_size(self):
+        return [len(b) for b in self.bins]
+    
+    def priority_update(self, indices, priorities, tds):
+        """ The methods update samples's priority.
 
-        return action[0], param
+        Parameters
+        ----------
+        indices :
+            list of sample indices
+        """
+        for idx, error, td in zip(indices, priorities, tds):
+            if idx == -1:
+                continue
+            if self.capacity_distribution=='uniform':
+                bin_id = idx//(self.capacity//self.data_bin*2-1)
+            elif self.capacity_distribution == 'exponential':
+                bin_id = 0
+                capacity_sum = 0
+                while capacity_sum+self.bins[bin_id].buffer.tree_size<=idx:
+                    capacity_sum+=self.bins[bin_id].buffer.tree_size
+                    bin_id+=1
+            idx_in_bin = idx - sum([abin.buffer.tree_size for abin in self.bins[:bin_id]])
+            if idx_in_bin<0:
+                print(idx_in_bin)
+            self.bins[bin_id].priority_update([idx_in_bin],[error],[td])
 
-    def reverse_action(self, action: tuple) -> tuple:
-        low = self.action_space[1].low
-        high = self.action_space[1].high
-        param = np.clip(action[1], low, high)
-        param = 2.0 * (param - low) / (high - low) - 1
+    def sample(self, batch_size):
+        """ sample batch_size data from replay buffer """
 
-        return action[0], param
+        assert isinstance(batch_size, int) or isinstance(batch_size, np.int64) or len(batch_size)==self.data_bin, "Batch size must be a number or a list as long as the list of bins"
+        s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst = [], [], [], [], [], [], []
+        for i in range(self.data_bin):
+            if len(self.bins[i])==0: 
+                continue
+            _batch = self.bins[i].sample(batch_size//self.data_bin)
+            _s_lst, _a_lst, _la_lst, _r_lst, _ns_lst, _d_lst, _episode_lst = _batch
+            s_lst = s_lst + _s_lst
+            a_lst = a_lst + _a_lst
+            la_lst = la_lst + _la_lst
+            r_lst = r_lst + _r_lst
+            ns_lst = ns_lst + _ns_lst
+            d_lst = d_lst + _d_lst
+            episode_lst = episode_lst + _episode_lst
+            batch_size -= 1
+        return s_lst, a_lst, la_lst, r_lst, ns_lst, d_lst, episode_lst
 
+    def __len__(self):
+        return sum([len(_bin.buffer) for _bin in self.bins])
+
+class NormalizedAction(gym.ActionWrapper):
+    """ Action Normalization: normalize continuous action  """
+
+    def action(self, action):
+        low = self.action_space.low
+        high = self.action_space.high
+
+        action = 0.5 * (action + 1.0) * (high - low) + low
+        action = np.clip(action, low, high)
+
+        return action
+
+    def reverse_action(self, action):
+        low = self.action_space.low
+        high = self.action_space.high
+        action = np.clip(action, low, high)
+        action = 2.0 * (action - low) / (high - low) - 1
+
+        return action
 
 class OUNoise(object):
     """

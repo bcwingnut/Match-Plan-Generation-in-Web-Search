@@ -20,15 +20,15 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 class PASAC_Agent_ERO(HybridBase):
     def __init__(self, env, debug, weights, gamma, replay_buffer_size, max_steps,
                  hidden_size, value_lr, policy_lr, batch_size, state_dim,
-                 action_discrete_dim, action_continuous_dim, soft_tau=1e-2, 
-                 use_exp=True, discrete_log_prob_scale=10, reward_l=0, reward_h=1, data_bin=8):
+                 action_discrete_dim, action_continuous_dim, rw_scale, soft_tau=1e-2, 
+                 use_exp=True, discrete_log_prob_scale=10):
         super(PASAC_Agent_ERO, self).__init__(debug, weights, gamma, replay_buffer_size, max_steps,
                                         hidden_size, value_lr, policy_lr, batch_size, state_dim,
                                              action_discrete_dim, action_continuous_dim)
 
         self.env = env
         
-        self.replay_buffer = ReplayBuffer_ERO(replay_buffer_size, device, reward_h, replay_updating_step=self.debug['replay_updating_step'])
+        self.replay_buffer = ReplayBuffer_ERO(replay_buffer_size, device, rw_scale, replay_updating_step=self.debug['replay_updating_step'])
         
         # [constants] copy
 
@@ -103,19 +103,6 @@ class PASAC_Agent_ERO(HybridBase):
             self.replay_buffer=pickle.load(df)
             df.close()
             self.replay_buffer=self.replay_buffer.uncompress()
-        
-        if self.debug['use_demonstration']:
-            if self.debug['demonstration_buffer']=='n':
-                self.demonstration_buffer = ReplayBuffer_MLP(self.debug['demonstration_buffer_size'])
-            elif self.debug['demonstration_buffer']=='lp2':
-                self.demonstration_buffer = PrioritizedReplayBuffer_SAC2_MLP(self.debug['demonstration_buffer_size'], reward_l, reward_h, data_bin)
-            elif self.debug['demonstration_buffer']in['lp3','ld']:
-                self.demonstration_buffer = PrioritizedReplayBuffer_SAC3_MLP(self.debug['demonstration_buffer_size'], 'uniform', reward_l, reward_h, data_bin)
-
-            self.collect_demonstration(self.debug['demonstration_number'])
-        else:
-            self.demonstration_buffer = None
-        self.demonstration_ratio = lambda x: max(0, 1-x*self.debug['demonstration_ratio_step']) if self.debug['use_demonstration'] else 0
 
     def act(self, state: np.ndarray, sampling: bool = False, need_print=False):
         """
@@ -302,12 +289,6 @@ class PASAC_Agent_ERO(HybridBase):
             df = open(self.debug['demonstration_path'], 'wb')
             pickle.dump(demonstrations, df)
             df.close()
-        # -----add seq to replay buffer-----
-        for experience in demonstrations:
-            self.demonstration_buffer.push(*experience)
-        # return self.reward_list
-        if has_multiple_bins(self.demonstration_buffer):
-                print('[Size of demonstration buffer]', str(self.demonstration_buffer.bin_size))
 
     def update_replay_policy(self, current_cumulative_reward, previous_cumulative_reward, episode):
         self.subset_buffer, self.subset_indices, avg_replay_loss = self.replay_buffer.policy_update(self.batch_size, current_cumulative_reward, previous_cumulative_reward, episode)

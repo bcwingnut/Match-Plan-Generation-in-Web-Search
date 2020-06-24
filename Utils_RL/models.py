@@ -312,6 +312,86 @@ class PASAC_PolicyNetwork_MLP(nn.Module):
 
         return c_action, d_action_prob[0].detach().cpu().numpy()
 
+class PASAC_PolicyNetwork_Continuous_MLP(nn.Module):
+    def __init__(self, num_inputs, max_steps, num_c_actions, hidden_size, action_range=1.,
+                 batch_size=512, init_w=3e-3, log_std_min=-20, log_std_max=2):
+        """
+        :param num_inputs: state dim
+        :param num_actions: discrete action dim
+        :param num_params: continuous action dim
+        """
+        super(PASAC_PolicyNetwork_Continuous_MLP, self).__init__()
+        self.batch_size = batch_size
+        self.hidden_size = hidden_size
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+        self.action_range = action_range
+        self.max_steps = max_steps
+        self.net = nn.Sequential(
+            nn.Linear(num_inputs, hidden_size, bias=True),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size, bias=True),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size, bias=True),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(inplace=True)
+        )
+
+        # init output layer for PASAC
+        self.mean_linear = nn.Sequential(
+            nn.Linear(hidden_size, num_c_actions, bias=True))
+        self.mean_linear[-1].weight.data.uniform_(-init_w, init_w)
+        self.mean_linear[-1].bias.data.uniform_(-init_w, init_w)
+        self.log_std_linear = nn.Sequential(
+            nn.Linear(hidden_size, num_c_actions, bias=True))
+        self.log_std_linear[-1].weight.data.uniform_(-init_w, init_w)
+        self.log_std_linear[-1].bias.data.uniform_(-init_w, init_w)
+
+    def forward(self, state):
+        out = self.net(state)
+        mean = self.mean_linear(out)
+        log_std = self.log_std_linear(out)
+        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
+
+        return mean, log_std
+
+    def evaluate(self, state, epsilon=1e-6):
+        '''
+        generate sampled action with state as input wrt the policy network;
+        '''
+        mean, log_std = self.forward(state)
+
+        std = log_std.exp()
+        normal = Normal(0, 1)
+        z = normal.sample().to(d)
+        c_action_0 = torch.tanh(mean + std * z)
+        c_action = self.action_range * c_action_0
+        log_prob = Normal(mean, std).log_prob(mean + std * z) - torch.log(
+            1. - c_action_0.pow(2) + epsilon) - np.log(self.action_range)
+
+        log_prob = log_prob.sum(dim=-1, keepdim=True)
+        return c_action, log_prob, z, mean, log_std
+
+    def get_action(self, state, deterministic=True):
+        state = torch.FloatTensor(state).unsqueeze(0).to(d)
+        mean, log_std = self.forward(state)
+
+        mean = mean[0]  # unsqueeze
+        log_std = log_std[0]
+
+        std = log_std.exp()
+        normal = Normal(0, 1)
+        z = normal.sample().to(d)
+
+        c_action = self.action_range * torch.tanh(mean + std * z)
+        c_action = (self.action_range * torch.tanh(mean).detach().cpu().numpy()
+                    if deterministic else c_action.detach().cpu().numpy())
+
+        return c_action
+
+
 
 class SAC_PolicyNetwork_MLP(nn.Module):
     def __init__(self, num_inputs, max_steps, num_d_actions, num_c_actions, hidden_size, action_range=1.,
@@ -445,7 +525,12 @@ class PASAC_QNetwork_MLP(nn.Module):
         self.value_fc[-1].bias.data.uniform_(-init_w, init_w)
 
     def forward(self, state, action_v, param):
-        cat_tensor = torch.cat((state, action_v, param), 1)
+        if action_v is None or action_v==[]:
+            cat_tensor = torch.cat((state, param), 1)
+        elif param is None or param==[]:
+            cat_tensor = torch.cat((state, action_v), 1)
+        else:
+            cat_tensor = torch.cat((state, action_v, param), 1)
         hidden = self.net(cat_tensor)
         out = self.value_fc(hidden)
         return out

@@ -93,11 +93,12 @@ def run(env,
             'forward_time': True,
 
             'L2_norm': 0,
-            'replay_buffer': 'lp3',
-            'demonstration_buffer': 'lp2',
+            'replay_buffer': 'lp3', # n for normal, p for prioritized(lifei), s for stratefied, l for sac, lp for lifel's prioritized_sac, lp2 for psac in KDD paper, lp3 psac in NIPS paper
+            'demonstration_buffer': 'lp2', # lp2 for psac in KDD paper, ld for dynamic
             'capacity_distribution': 'uniform',
             'use_log': False,
-            # n for normal, p for prioritized(lifei), s for stratefied, l for sac_lstm, lp for prioritized_sac_lstm
+            'replay_updating_step': 10,
+            'print_scorenet': False
             }
 
     print('=================debug parameters=================')
