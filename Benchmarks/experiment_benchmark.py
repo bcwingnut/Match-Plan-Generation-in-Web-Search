@@ -456,10 +456,10 @@ def train_dem_mlp(log_name, env_name, debug,
             id_arr = np.arange(len(agent.replay_buffer))
             priority_arr = agent.replay_buffer.priorities
             plt.scatter(x=reward_arr, y=priority_arr, marker='.', s=1)
-            plt.savefig('plot/'+start.strftime('%m.%d-%H-%M-%S') + env_name + str(episode) + 'rw_pr.png')  
+            plt.savefig(debug['plot_path']+start.strftime('%m.%d-%H-%M-%S') + env_name + str(episode) + 'rw_pr.png')  
             plt.clf()
             plt.scatter(x=id_arr, y=priority_arr, marker='.', s=1)
-            plt.savefig('plot/'+start.strftime('%m.%d-%H-%M-%S') + env_name + str(episode) + 'id_pr.png')
+            plt.savefig(debug['plot_path']+start.strftime('%m.%d-%H-%M-%S') + env_name + str(episode) + 'id_pr.png')
             plt.clf()
             
 
@@ -480,7 +480,6 @@ def train_ero(log_name, env_name, debug,
           weights, gamma, replay_buffer_size,
           hidden_size, value_lr, policy_lr, soft_tau=1e-2,
           use_exp=True, use_nni=False, rnn_step=10, discrete_log_prob_scale=10):
-    training_step = 50
     assert env_name in ['Platform-v0', 'Goal-v0']
     if 'Goal' in env_name:
         import gym_goal
@@ -525,105 +524,109 @@ def train_ero(log_name, env_name, debug,
     previous_cumulative_reward = 0.
     state0 = env.reset()
     action0, _, action_v0, param0 = agent.act(state0, debug['sampling'])
-    for episode in range(train_episodes):
-        # -----save model-----
-        if debug['save_model'] and episode % debug['save_freq'] == 0 and episode > 0:
-            print('============================================')
-            print("Savepoint - Save model in episodes:", episode)
-            print('============================================')
-            agent.save(episode)
+    episode = 0
+    while episode < train_episodes:
+        
+        for _ in range(debug['rollout_steps']):
+            if debug['save_model'] and episode % debug['save_freq'] == 0 and episode > 0:
+                # -----save model-----
+                print('============================================')
+                print("Savepoint - Save model in episodes:", episode)
+                print('============================================')
+                agent.save(episode)
+            
+            # -----reset env-----
+            state = env.reset()
+            next_state0, reward0, done0, _ = env.step(action0)
 
-        # -----reset env-----
-        state = env.reset()
-        next_state0, reward0, done0, _ = env.step(action0)
+            # -----init-----
+            episode_reward_sum = 0.
+            episode += 1
 
-        # -----init-----
-        episode_reward_sum = 0.
+            for step in range(max_steps):
+                # -----step-----
+                agent.total_step += 1
+                action, _, action_v, param = agent.act(state, debug['sampling'])
+                next_state, reward, done, _ = env.step(action)
+                state_=torch.FloatTensor([state]).to(agent.device)
+                action_v_=torch.FloatTensor([action_v]).to(agent.device)
+                param_=torch.FloatTensor([param]).to(agent.device)
+                next_state_=torch.FloatTensor([next_state]).to(agent.device)
+                predicted_q_value1 = agent.soft_q_net1(state_, action_v_, param_)
+                predicted_q_value2 = agent.soft_q_net2(state_, action_v_, param_)
+                new_action_v, new_param, log_prob, _, _, _ = agent.policy_net.evaluate(state_)
+                new_next_action_v, new_next_param, next_log_prob, _, _, _ = agent.policy_net.evaluate(next_state_)
+                predict_q1 = agent.soft_q_net1(state_, new_action_v, new_param)
+                predict_q2 = agent.soft_q_net2(state_, new_action_v, new_param)
+                predicted_new_q_value = torch.min(predict_q1, predict_q2)
+                predict_target_q1 = agent.target_soft_q_net1(next_state_, new_next_action_v, new_next_param)
+                predict_target_q2 = agent.target_soft_q_net2(next_state_, new_next_action_v, new_next_param)
+                action_sum_log_prob = agent.get_log_action_prob(new_action_v, agent.use_exp)
+                action_sum_log_prob_next = agent.get_log_action_prob(new_next_action_v, agent.use_exp)
+                policy_loss = agent.alpha_c * log_prob + agent.alpha_d * action_sum_log_prob - predicted_new_q_value
+                target_q_min = torch.min(predict_target_q1, predict_target_q2) - agent.alpha_c * next_log_prob - agent.alpha_d * action_sum_log_prob_next
+                target_q_value = reward + (1 - done) * gamma * target_q_min
+                q_value_loss1 = predicted_q_value1 - target_q_value.detach()
+                q_value_loss2 = predicted_q_value2 - target_q_value.detach()
+                error = (q_value_loss1**2+q_value_loss2**2+policy_loss**2*agent.w_policy_loss).detach().cpu().numpy().squeeze()
 
-        for step in range(max_steps):
-            # -----step-----
-            agent.total_step += 1
-            action, _, action_v, param = agent.act(state, debug['sampling'])
-            next_state, reward, done, _ = env.step(action)
-            state_=torch.FloatTensor([state]).to(agent.device)
-            action_v_=torch.FloatTensor([action_v]).to(agent.device)
-            param_=torch.FloatTensor([param]).to(agent.device)
-            next_state_=torch.FloatTensor([next_state]).to(agent.device)
-            predicted_q_value1 = agent.soft_q_net1(state_, action_v_, param_)
-            predicted_q_value2 = agent.soft_q_net2(state_, action_v_, param_)
-            new_action_v, new_param, log_prob, _, _, _ = agent.policy_net.evaluate(state_)
-            new_next_action_v, new_next_param, next_log_prob, _, _, _ = agent.policy_net.evaluate(next_state_)
-            predict_q1 = agent.soft_q_net1(state_, new_action_v, new_param)
-            predict_q2 = agent.soft_q_net2(state_, new_action_v, new_param)
-            predicted_new_q_value = torch.min(predict_q1, predict_q2)
-            predict_target_q1 = agent.target_soft_q_net1(next_state_, new_next_action_v, new_next_param)
-            predict_target_q2 = agent.target_soft_q_net2(next_state_, new_next_action_v, new_next_param)
-            action_sum_log_prob = agent.get_log_action_prob(new_action_v, agent.use_exp)
-            action_sum_log_prob_next = agent.get_log_action_prob(new_next_action_v, agent.use_exp)
-            policy_loss = agent.alpha_c * log_prob + agent.alpha_d * action_sum_log_prob - predicted_new_q_value
-            target_q_min = torch.min(predict_target_q1, predict_target_q2) - agent.alpha_c * next_log_prob - agent.alpha_d * action_sum_log_prob_next
-            target_q_value = reward + (1 - done) * gamma * target_q_min
-            q_value_loss1 = predicted_q_value1 - target_q_value.detach()
-            q_value_loss2 = predicted_q_value2 - target_q_value.detach()
-            error = (q_value_loss1**2+q_value_loss2**2+policy_loss**2*agent.w_policy_loss).detach().cpu().numpy().squeeze()
+                agent.replay_buffer.push(state, action_v, param, reward, next_state, done, episode, error)
 
-            agent.replay_buffer.push(state, action_v, param, reward, next_state, done, episode, error)
+                # -----move to the next step-----
+                state = next_state
 
-            # -----move to the next step-----
-            state = next_state
+                # -----done-----
+                if done:
+                    break
+            env1.seed(0)
+            state = env1.reset()
+            for step in range(max_steps):
+                # -----step-----
+                action, _, action_v, param = agent.act(state, debug['sampling'])
+                next_state, reward, done, _ = env1.step(action)
 
-            # -----done-----
-            if done:
-                break
-        env1.seed(0)
-        state = env1.reset()
-        for step in range(max_steps):
-            # -----step-----
-            action, _, action_v, param = agent.act(state, debug['sampling'])
-            next_state, reward, done, _ = env1.step(action)
+                # -----move to the next step-----
+                state = next_state
+                episode_reward_sum += reward
 
-            # -----move to the next step-----
-            state = next_state
-            episode_reward_sum += reward
+                # -----done-----
+                if done:
+                    break
+            avg_replay_loss = agent.update_replay_policy(episode_reward_sum, previous_cumulative_reward, episode)
+            writer.add_scalar('Replay-Loss-' + env_name, avg_replay_loss, global_step=episode)
+            previous_cumulative_reward = episode_reward_sum
 
-            # -----done-----
-            if done:
-                break
-        avg_replay_loss = agent.update_replay_policy(episode_reward_sum, previous_cumulative_reward, episode)
-        writer.add_scalar('Replay-Loss-' + env_name, avg_replay_loss, global_step=episode)
-        previous_cumulative_reward = episode_reward_sum
+            # -----update models-----
+            avg_total_error_lst = []
+            for _ in range(debug['training_steps']):
+                if len(agent.replay_buffer) > batch_size and step % update_freq == 0:
+                    avg_predicted_new_q_value, avg_total_error = agent.update(batch_size,
+                                episode=episode,
+                                auto_entropy=True,
+                                soft_tau=soft_tau,
+                                target_entropy=-1. * (action_continuous_dim),
+                                need_print=(episode % debug['print_freq'] == 0) and step == 0)
+                    avg_total_error_lst.append(avg_total_error)
+            writer.add_scalar('Total-Error-' + env_name, np.asarray(avg_total_error_lst).mean(), global_step=episode)
 
-        # -----update models-----
-        avg_total_error_lst = []
-        for _ in range(training_step):
-            if len(agent.replay_buffer) > batch_size and step % update_freq == 0:
-                avg_predicted_new_q_value, avg_total_error = agent.update(batch_size,
-                             episode=episode,
-                             auto_entropy=True,
-                             soft_tau=soft_tau,
-                             target_entropy=-1. * (action_continuous_dim),
-                             need_print=(episode % debug['print_freq'] == 0) and step == 0)
-                avg_total_error_lst.append(avg_total_error)
-        writer.add_scalar('Total-Error-' + env_name, np.asarray(avg_total_error_lst).mean(), global_step=episode)
-
-        if episode % 100 == 0 and debug['print_scorenet']:
-            print(f'episode: {episode}, reward: {episode_reward_sum}')
-            for name, param in agent.replay_buffer.score_net.named_parameters():
-                if param.requires_grad:
-                    print(name, param.data)
-        returns.append(episode_reward_sum)
-        if not use_nni:
-            writer.add_scalar('Training-Reward-' + env_name, episode_reward_sum, global_step=episode)
-
-        # [periodic evaluation]
-        if episode % 10 == 0:  # more frequent
-            print(episode, '[time]', datetime.datetime.now() - start,
-                  episode_reward_sum, '\n', '>>>>>>>>>>>>>>>>')
-
-            # [evaluation]
-            episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=1)
+            if episode % 100 == 0 and debug['print_scorenet']:
+                print(f'episode: {episode}, reward: {episode_reward_sum}')
+                for name, param in agent.replay_buffer.score_net.named_parameters():
+                    if param.requires_grad:
+                        print(name, param.data)
+            returns.append(episode_reward_sum)
             if not use_nni:
-                writer.add_scalar('EvalReward-' + env_name, episode_reward_eval, global_step=episode)
+                writer.add_scalar('Training-Reward-' + env_name, episode_reward_sum, global_step=episode)
+
+            # [periodic evaluation]
+            if episode % 10 == 0:  # more frequent
+                print(episode, '[time]', datetime.datetime.now() - start,
+                    episode_reward_sum, '\n', '>>>>>>>>>>>>>>>>')
+
+        # [evaluation]
+        episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=1)
+        if not use_nni:
+            writer.add_scalar('EvalReward-' + env_name, episode_reward_eval, global_step=episode)
         
         # if episode % 10000 < 3:
         #     print("Replay buffer in episode " + str(episode))
@@ -648,7 +651,6 @@ def train_ero_cont(log_name, env_name, debug,
           weights, gamma, replay_buffer_size,
           hidden_size, value_lr, policy_lr, soft_tau=1e-2,
           use_exp=True, use_nni=False, rnn_step=10, discrete_log_prob_scale=10):
-    training_step = 50
     assert env_name in ['Reacher-v2', 'HalfCheetah-v2']
     if 'Reacher' in env_name:
         rw_scale = 1./40
@@ -678,101 +680,103 @@ def train_ero_cont(log_name, env_name, debug,
     if not use_nni:
         writer = SummaryWriter(NAME)
     previous_cumulative_reward = 0.
-    for episode in range(train_episodes):
-        # -----save model-----
-        if debug['save_model'] and episode % debug['save_freq'] == 0 and episode > 0:
-            print('============================================')
-            print("Savepoint - Save model in episodes:", episode)
-            print('============================================')
-            agent.save(episode)
+    episode = 0
+    while episode < train_episodes:
+        for _ in range(debug['rollout_steps']):
+            # -----save model-----
+            if debug['save_model'] and episode % debug['save_freq'] == 0 and episode > 0:
+                print('============================================')
+                print("Savepoint - Save model in episodes:", episode)
+                print('============================================')
+                agent.save(episode)
 
-        # -----reset env-----
-        state = env.reset()
+            # -----reset env-----
+            state = env.reset()
 
-        # -----init-----
-        episode_reward_sum = 0.
+            # -----init-----
+            episode_reward_sum = 0.
+            episode+=1
+            for step in range(max_steps):
+                # -----step-----
+                agent.total_step += 1
+                action = agent.act(state, debug['sampling'])
+                action_= torch.FloatTensor([action]).to(agent.device)
+                next_state, reward, done, _ = env.step(action)
+                state_=torch.FloatTensor([state]).to(agent.device)
+                next_state_=torch.FloatTensor([next_state]).to(agent.device)
+                predicted_q_value1 = agent.soft_q_net1(state_, None, action_)
+                predicted_q_value2 = agent.soft_q_net2(state_, None, action_)
+                new_action, log_prob, _, _, _ = agent.policy_net.evaluate(state_)
+                new_next_action, next_log_prob, _, _, _ = agent.policy_net.evaluate(next_state_)
+                predict_q1 = agent.soft_q_net1(state_, None, new_action)
+                predict_q2 = agent.soft_q_net2(state_, None, new_action)
+                predicted_new_q_value = torch.min(predict_q1, predict_q2)
+                predict_target_q1 = agent.target_soft_q_net1(next_state_, None, new_next_action)
+                predict_target_q2 = agent.target_soft_q_net2(next_state_, None, new_next_action)
+                policy_loss = agent.alpha_c * log_prob - predicted_new_q_value
+                target_q_min = torch.min(predict_target_q1, predict_target_q2) - agent.alpha_c * next_log_prob
+                target_q_value = reward + (1 - done) * gamma * target_q_min
+                q_value_loss1 = predicted_q_value1 - target_q_value.detach()
+                q_value_loss2 = predicted_q_value2 - target_q_value.detach()
+                error = (q_value_loss1**2+q_value_loss2**2+policy_loss**2*agent.w_policy_loss).detach().cpu().numpy().squeeze()
 
-        for step in range(max_steps):
-            # -----step-----
-            agent.total_step += 1
-            action = agent.act(state, debug['sampling'])
-            action_= torch.FloatTensor([action]).to(agent.device)
-            next_state, reward, done, _ = env.step(action)
-            state_=torch.FloatTensor([state]).to(agent.device)
-            next_state_=torch.FloatTensor([next_state]).to(agent.device)
-            predicted_q_value1 = agent.soft_q_net1(state_, None, action_)
-            predicted_q_value2 = agent.soft_q_net2(state_, None, action_)
-            new_action, log_prob, _, _, _ = agent.policy_net.evaluate(state_)
-            new_next_action, next_log_prob, _, _, _ = agent.policy_net.evaluate(next_state_)
-            predict_q1 = agent.soft_q_net1(state_, None, new_action)
-            predict_q2 = agent.soft_q_net2(state_, None, new_action)
-            predicted_new_q_value = torch.min(predict_q1, predict_q2)
-            predict_target_q1 = agent.target_soft_q_net1(next_state_, None, new_next_action)
-            predict_target_q2 = agent.target_soft_q_net2(next_state_, None, new_next_action)
-            policy_loss = agent.alpha_c * log_prob - predicted_new_q_value
-            target_q_min = torch.min(predict_target_q1, predict_target_q2) - agent.alpha_c * next_log_prob
-            target_q_value = reward + (1 - done) * gamma * target_q_min
-            q_value_loss1 = predicted_q_value1 - target_q_value.detach()
-            q_value_loss2 = predicted_q_value2 - target_q_value.detach()
-            error = (q_value_loss1**2+q_value_loss2**2+policy_loss**2*agent.w_policy_loss).detach().cpu().numpy().squeeze()
+                agent.replay_buffer.push(state, None, action, reward, next_state, done, episode, error)
 
-            agent.replay_buffer.push(state, None, action, reward, next_state, done, episode, error)
+                # -----move to the next step-----
+                state = next_state
 
-            # -----move to the next step-----
-            state = next_state
+                # -----done-----
+                if done:
+                    break
+            env1.seed(0)
+            state = env1.reset()
+            for step in range(max_steps):
+                # -----step-----
+                action = agent.act(state, debug['sampling'])
+                next_state, reward, done, _ = env1.step(action)
 
-            # -----done-----
-            if done:
-                break
-        env1.seed(0)
-        state = env1.reset()
-        for step in range(max_steps):
-            # -----step-----
-            action = agent.act(state, debug['sampling'])
-            next_state, reward, done, _ = env1.step(action)
+                # -----move to the next step-----
+                state = next_state
+                episode_reward_sum += reward
 
-            # -----move to the next step-----
-            state = next_state
-            episode_reward_sum += reward
+                # -----done-----
+                if done:
+                    break
+            avg_replay_loss = agent.update_replay_policy(episode_reward_sum, previous_cumulative_reward, episode)
+            writer.add_scalar('Replay-Loss-' + env_name, avg_replay_loss, global_step=episode)
+            previous_cumulative_reward = episode_reward_sum
 
-            # -----done-----
-            if done:
-                break
-        avg_replay_loss = agent.update_replay_policy(episode_reward_sum, previous_cumulative_reward, episode)
-        writer.add_scalar('Replay-Loss-' + env_name, avg_replay_loss, global_step=episode)
-        previous_cumulative_reward = episode_reward_sum
+            # -----update models-----
+            avg_total_error_lst = []
+            for _ in range(debug['training_steps']):
+                if len(agent.replay_buffer) > batch_size and step % update_freq == 0:
+                    avg_predicted_new_q_value, avg_total_error = agent.update(batch_size,
+                                episode=episode,
+                                auto_entropy=True,
+                                soft_tau=soft_tau,
+                                target_entropy=-1. * (action_continuous_dim),
+                                need_print=(episode % debug['print_freq'] == 0) and step == 0)
+                    avg_total_error_lst.append(avg_total_error)
+            writer.add_scalar('Total-Error-' + env_name, np.asarray(avg_total_error_lst).mean(), global_step=episode)
 
-        # -----update models-----
-        avg_total_error_lst = []
-        for _ in range(training_step):
-            if len(agent.replay_buffer) > batch_size and step % update_freq == 0:
-                avg_predicted_new_q_value, avg_total_error = agent.update(batch_size,
-                             episode=episode,
-                             auto_entropy=True,
-                             soft_tau=soft_tau,
-                             target_entropy=-1. * (action_continuous_dim),
-                             need_print=(episode % debug['print_freq'] == 0) and step == 0)
-                avg_total_error_lst.append(avg_total_error)
-        writer.add_scalar('Total-Error-' + env_name, np.asarray(avg_total_error_lst).mean(), global_step=episode)
-
-        if episode % 100 == 0 and debug['print_scorenet']:
-            print(f'episode: {episode}, reward: {episode_reward_sum}')
-            for name, param in agent.replay_buffer.score_net.named_parameters():
-                if param.requires_grad:
-                    print(name, param.data)
-        returns.append(episode_reward_sum)
-        if not use_nni:
-            writer.add_scalar('Training-Reward-' + env_name, episode_reward_sum, global_step=episode)
-
-        # [periodic evaluation]
-        if episode % 10 == 0:  # more frequent
-            print(episode, '[time]', datetime.datetime.now() - start,
-                  episode_reward_sum, '\n', '>>>>>>>>>>>>>>>>')
-
-            # [evaluation]
-            episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=1, parameterized_action=False)
+            if episode % 100 == 0 and debug['print_scorenet']:
+                print(f'episode: {episode}, reward: {episode_reward_sum}')
+                for name, param in agent.replay_buffer.score_net.named_parameters():
+                    if param.requires_grad:
+                        print(name, param.data)
+            returns.append(episode_reward_sum)
             if not use_nni:
-                writer.add_scalar('EvalReward-' + env_name, episode_reward_eval, global_step=episode)
+                writer.add_scalar('Training-Reward-' + env_name, episode_reward_sum, global_step=episode)
+            
+            # [periodic evaluation]
+            if episode % 10 == 0:  # more frequent
+                print(episode, '[time]', datetime.datetime.now() - start,
+                    episode_reward_sum, '\n', '>>>>>>>>>>>>>>>>')
+
+        # [evaluation]
+        episode_reward_eval = evaluate_mlp(agent, env, max_steps, use_nni, eval_repeat=1, parameterized_action=False)
+        if not use_nni:
+            writer.add_scalar('EvalReward-' + env_name, episode_reward_eval, global_step=episode)
         
         # if episode % 10000 < 3:
         #     print("Replay buffer in episode " + str(episode))

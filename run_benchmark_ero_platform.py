@@ -8,10 +8,10 @@ import torch
 @click.command()
 @click.option('--env', default='Platform-v0')  # = Platform-v0 / Goal-v0
 @click.option('--seed', default=0)
-@click.option('--log_name', default="Platform_ero")
+@click.option('--log_name', default="Platform_ero_nrw")
 @click.option('--weights', default=[1., -1, 0.])  # [reward design]
 @click.option('--gamma', default=0.95)
-@click.option('--replay_buffer_size', default=50000)
+@click.option('--replay_buffer_size', default=1000000)
 # [network]
 @click.option('--hidden_size', default=128)
 @click.option('--value_lr', default=0.0023631049207951177)
@@ -83,6 +83,8 @@ def run(env,
             "discrete_bcloss_weight": 5,
             'pretrain': False,
             'pretrain_episodes': 50000,
+            'rollout_steps': 200,
+            'training_steps': 50,
 
             'save_model': True,  # save checkpoints or not
             'load_model': False,  # load checkpoints at the beginning or not, 'load_filename' should be assigned
@@ -139,7 +141,7 @@ def seed_torch(seed=1029):
 if __name__ == '__main__':
     print('******PID:' + str(os.getpid()) + '******')
 
-    gpu_id = 1  # change here to alter GPU id
+    gpu_id = 6  # change here to alter GPU id
     print('GPU id:'+str(gpu_id))
     with torch.cuda.device(gpu_id):
         run()
